@@ -9,13 +9,28 @@ public protocol Transport: Sendable {
     func send(_ request: URLRequest) async throws -> (Data, Int)
 }
 
-struct URLSessionTransport: Transport {
+/// `@unchecked` because `URLSession` is not `Sendable` in corelibs-foundation,
+/// though it is safe to use from multiple tasks. Marking it is the difference
+/// between a warning on every Linux build and none.
+struct URLSessionTransport: Transport, @unchecked Sendable {
     let session: URLSession
 
     func send(_ request: URLRequest) async throws -> (Data, Int) {
-        let (data, response) = try await session.data(for: request)
-        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-        return (data, status)
+        /* `session.data(for:)` does not exist in corelibs-foundation on Linux,
+           only on Apple platforms — so this wraps `dataTask`, which exists on
+           both, rather than carrying two code paths behind an #if. The CI's
+           Linux job is what caught this. */
+        try await withCheckedThrowingContinuation { continuation in
+            let task = session.dataTask(with: request) { data, response, error in
+                if let error {
+                    continuation.resume(throwing: error)
+                    return
+                }
+                let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+                continuation.resume(returning: (data ?? Data(), status))
+            }
+            task.resume()
+        }
     }
 }
 
