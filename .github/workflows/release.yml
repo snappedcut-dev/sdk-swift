@@ -1,0 +1,32 @@
+name: Release
+
+# SwiftPM has no registry to push to: a consumer resolves this package straight
+# from the tag. So "releasing" is proving the tag is good, on both platforms,
+# before anyone can resolve it.
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: macos-14
+    environment: release
+    steps:
+      - uses: actions/checkout@v4
+      - run: swift build
+      - run: swift test
+      - name: The tag must point at this commit
+        run: |
+          [ "$(git rev-list -n1 "${GITHUB_REF_NAME}")" = "${GITHUB_SHA}" ] \
+            || { echo "tag does not point at the tested commit"; exit 1; }
+
+  linux:
+    runs-on: ubuntu-latest
+    container: swift:5.10
+    steps:
+      - uses: actions/checkout@v4
+      - run: swift test

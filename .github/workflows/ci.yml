@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  apple:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - run: swift --version
+      - run: swift build
+      - run: swift test
+
+  linux:
+    # Linux is not an afterthought: it is where `FoundationNetworking` has to be
+    # imported separately, and the one platform that catches a missing
+    # `#if canImport` guard. A server-side Swift user builds here.
+    runs-on: ubuntu-latest
+    container: swift:5.10
+    steps:
+      - uses: actions/checkout@v4
+      - run: swift build
+      - run: swift test
