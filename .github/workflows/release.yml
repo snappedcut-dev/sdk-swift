@@ -13,7 +13,7 @@ permissions:
 
 jobs:
   verify:
-    runs-on: macos-14
+    runs-on: macos-latest
     environment: release
     steps:
       - uses: actions/checkout@v4
