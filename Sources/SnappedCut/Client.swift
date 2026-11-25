@@ -63,6 +63,8 @@ public struct SnappedCut: Sendable {
     public static let chunk = 64 * 1024 * 1024
 
     static let maxAttempts = 3
+    static let unreserved = CharacterSet(charactersIn:
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
 
     let key: String
     let base: String
@@ -302,8 +304,9 @@ public struct SnappedCut: Sendable {
         }
     }
 
+    /// RFC 3986's unreserved characters pass; everything else, `/` included, is escaped.
     func escape(_ value: String) -> String {
-        value.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? value
+        value.addingPercentEncoding(withAllowedCharacters: SnappedCut.unreserved) ?? value
     }
 }
 
