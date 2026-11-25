@@ -41,6 +41,8 @@ public struct Job: Codable, Equatable, Sendable {
     public let seconds: Double
     public let createdAt: Int
     public let updatedAt: Int
+    /// One entry per rendered file, once the job has some.
+    public let outputs: [JobOutput]?
 
     public var isDone: Bool { state == .done }
     public var isFailed: Bool { state == .failed }
@@ -54,6 +56,7 @@ public struct Job: Codable, Equatable, Sendable {
         seconds = try values.decodeIfPresent(Double.self, forKey: .seconds) ?? 0
         createdAt = try values.decodeIfPresent(Int.self, forKey: .createdAt) ?? 0
         updatedAt = try values.decodeIfPresent(Int.self, forKey: .updatedAt) ?? 0
+        outputs = try values.decodeIfPresent([JobOutput].self, forKey: .outputs)
     }
 }
 
@@ -113,4 +116,86 @@ struct JobsBody: Decodable {
 struct ChunkBody: Decodable {
     let upload: String
     let received: Int
+}
+
+// MARK: - The 0.2.0 surface
+//
+// Fields the API marks optional are optional here; unknown fields are ignored.
+
+public struct JobOutput: Codable, Equatable, Sendable {
+    public let index: Int
+    public let key: String?
+    public let format: String
+    public let contentType: String?
+    public let bytes: Int
+    public let url: String
+    public let location: String?
+    public let delivered: Bool?
+    public let deliveryError: String?
+}
+
+/// What `createJob` and `renderDesign` answer: the job, and what it cost.
+/// `idempotent` is true when an Idempotency-Key matched an earlier job.
+public struct Created: Codable, Equatable, Sendable {
+    public let job: Job
+    public let charged: Int
+    public let price: Int
+    public let credits: Int?
+    public let idempotent: Bool?
+}
+
+public struct Asset: Codable, Equatable, Sendable {
+    public let id: String
+    public let name: String?
+    public let contentType: String
+    public let bytes: Int?
+    public let sha256: String?
+    public let durationSeconds: Double?
+    public let width: Int?
+    public let height: Int?
+    public let hasAudio: Bool?
+    public let confirmed: Bool
+    public let createdAt: Double?
+    public let expiresAt: Double?
+}
+
+public struct WebhookEndpoint: Codable, Equatable, Sendable {
+    public let id: String
+    public let url: String
+    public let events: [String]
+    public let enabled: Bool
+    public let createdAt: Double?
+}
+
+/// A new endpoint, and its secret -- which comes back this once.
+public struct CreatedWebhook: Codable, Equatable, Sendable {
+    public let webhook: WebhookEndpoint
+    public let secret: String
+}
+
+public struct StorageDestination: Codable, Equatable, Sendable {
+    public let id: String
+    public let name: String
+    public let endpoint: String
+    public let region: String?
+    public let bucket: String
+    public let prefix: String?
+    public let pathStyle: Bool?
+    public let accessKeyId: String?
+    public let createdAt: Double?
+    public let updatedAt: Double?
+}
+
+// The envelopes the server wraps single objects in.
+struct AssetBody: Decodable { let asset: Asset }
+struct DestinationBody: Decodable { let destination: StorageDestination }
+struct DestinationsBody: Decodable { let destinations: [StorageDestination] }
+struct WebhookBody: Decodable { let webhook: WebhookEndpoint }
+struct WebhooksBody: Decodable { let webhooks: [WebhookEndpoint] }
+struct SecretBody: Decodable { let secret: String }
+struct DeliveriesBody: Decodable { let deliveries: [JSONValue] }
+struct UploadStart: Decodable {
+    let assetId: String
+    let upload: Target
+    struct Target: Decodable { let url: String; let maxChunkBytes: Int? }
 }

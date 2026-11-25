@@ -6,7 +6,7 @@ it adds nothing to an app that already links Foundation.
 
 ```swift
 // Package.swift
-.package(url: "https://github.com/snappedcut-dev/sdk-swift", from: "0.1.0")
+.package(url: "https://github.com/snappedcut-dev/sdk-swift", from: "0.2.0")
 ```
 
 ```swift
@@ -14,12 +14,24 @@ import SnappedCut
 
 let snapcut = SnappedCut()                       // reads SNAPCUT_KEY
 
-let job = try await snapcut.render(bundle)
-print("charged \(job.charged) credits for \(job.priced.seconds)s")
-
-let file = try await snapcut.wait(job.id) { print($0.state.rawValue) }
-try file.write(to: URL(filePath: "out.webm"))
+let clip = try await snapcut.upload(file: URL(fileURLWithPath: "clip.webm"), contentType: "video/webm")
+let design: JSONValue = ["width": 1080, "height": 1920, "clips": [
+    ["type": "video", "asset": .string(clip.id)],
+    ["type": "text", "text": "Hello", "start": 0, "duration": 3],
+]]
+let created = try await snapcut.renderDesign(design, options: [
+    "outputs": [["format": "mp4", "preset": "vertical"], ["format": "webm", "preset": "square"]],
+], idempotencyKey: "launch-video-1")                // a retry is the same job, not a second charge
+let job = try await snapcut.waitForJob(created.job.id)
+for output in job.outputs ?? [] {
+    let file = try await snapcut.downloadOutput(job.id, index: output.index)
+    try file.write(to: URL(fileURLWithPath: "out-\(output.index).\(output.format)"))
+}
 ```
+
+Presets: `source`, `vertical`, `square`, `portrait`, `landscape`, `hd720`,
+`uhd2160`. A project bundle from the editor still goes through
+`render(_:)` and `wait(_:)`, as in 0.1.0.
 
 Get a key from [your account page](https://snappedcut.com/account) — it looks
 like `sk_snapcut_…`. Keep it out of the app binary; it spends credits. For a
@@ -37,9 +49,37 @@ Platforms: macOS 13+, iOS 16+, tvOS 16+, watchOS 9+, visionOS 1+, and Linux.
 | `job(_:)` / `jobs()` | One job, or every job on the account. |
 | `output(_:)` | The rendered bytes. Throws unless the job is done. |
 | `wait(_:timeout:onState:)` | Polls to completion, returns the bytes. |
+| `createJob(_:idempotencyKey:)` / `createBatch(_:defaults:)` | A JSON job (design, bundle asset, tool), or up to 100. |
+| `getJob(_:)` / `listJobs()` / `downloadOutput(_:index:)` | One job, every job, one rendered file. |
+| `waitForJob(_:timeout:onState:)` | Polls to completion, returns the job and its `outputs`. |
+| `compileDesign(_:vars:)` / `renderDesign(_:options:idempotencyKey:)` | A design, compiled or rendered. |
+| `upload(_:contentType:name:)` / `upload(file:contentType:name:)` | Chunked direct upload; a file is read a chunk at a time. |
+| `getAsset(_:)` / `deleteAsset(_:)` | An uploaded asset. |
+| `operations()` | Every operation, its parameters, the presets. |
+| `usage(from:to:endUserId:groupBy:)` / `deleteEndUser(_:)` | Usage, and forgetting one end user. |
+| `createEmbedToken(pk:endUserId:...)` | An embed session token for one of your users. |
+| `listDestinations()` ... `testDestination(_:)` / `presignDestination(_:key:expiresIn:)` | Your own S3-compatible buckets. |
+| `listWebhooks()` ... `rotateWebhook(_:)` / `webhookDeliveries(_:limit:)` / `testWebhook(_:)` | Webhook endpoints. |
+| `SnappedCut.verifyWebhook(secret:rawBody:signatureHeader:)` | Check a webhook's signature. |
 
 Everything is `async throws` and `Sendable`, and `wait` honours task
 cancellation between polls.
+
+## Verifying webhooks
+
+```swift
+let ok = SnappedCut.verifyWebhook(
+    secret: "whsec_...",
+    rawBody: rawBodyString,                      // exactly as received
+    signatureHeader: request.value(forHTTPHeaderField: "X-Snappedcut-Signature")
+)
+guard ok else { return 400 }
+```
+
+The header is `t=<epoch ms>,v1=<hex HMAC-SHA256 of "t.body">`. A stamp more
+than five minutes off is refused, and the comparison is constant-time. The
+HMAC is plain Swift rather than CryptoKit, which is Apple-only, so it works on
+Linux too without a dependency.
 
 ## Large bundles resume themselves
 
@@ -59,8 +99,10 @@ actually charged is in `charged`, with the server's reasoning in `priced`.
 
 ## Errors
 
-Every failure is a `SnappedCutError` carrying the HTTP status, and the three
-cases you actually branch on are properties:
+Every failure is a `SnappedCutError` carrying the HTTP status (and the body's
+`code`, when there is one), and the three cases you actually branch on are
+properties (`isOutOfCredits` and `isRateLimited` are the same two, under the
+names every Snapped Cut SDK uses):
 
 ```swift
 do {
@@ -85,7 +127,8 @@ throws, so there is nothing to reconcile.
 
 ## Decoding is forgiving on purpose
 
-Every response field has a default, and an unrecognised `state` from a newer
+Every field of a job and an account has a default, unknown fields are ignored
+everywhere, and an unrecognised `state` from a newer
 server decodes as `queued` rather than throwing. A client that cannot parse a
 job it could still poll is worse than one that treats an unknown state as
 pending — so a server that grows a field, or a state, does not break shipped

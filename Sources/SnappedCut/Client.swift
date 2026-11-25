@@ -37,8 +37,9 @@ struct URLSessionTransport: Transport, @unchecked Sendable {
 /// A client for the Snapped Cut cloud render API.
 ///
 /// URLSession and Foundation, and nothing else -- no package dependencies, so
-/// it adds nothing to an app that already links Foundation. The API is five
-/// endpoints; a client for it should be readable in one sitting.
+/// it adds nothing to an app that already links Foundation. The render queue
+/// is here; the rest of the API (JSON jobs, uploads, designs, destinations,
+/// webhooks) is in `API.swift`.
 ///
 /// ```swift
 /// let snapcut = SnappedCut()                       // reads SNAPCUT_KEY
@@ -50,6 +51,7 @@ struct URLSessionTransport: Transport, @unchecked Sendable {
 /// it. The editing itself runs on Snapped Cut's machines, driven from the
 /// editor or the embed -- not from here.
 public struct SnappedCut: Sendable {
+    public static let version = "0.2.0"
     public static let defaultBase = "https://snappedcut.com"
 
     /// How much of a bundle goes in one request.
@@ -91,25 +93,33 @@ public struct SnappedCut: Sendable {
 
     // MARK: - Plumbing
 
+    /// `elsewhere` is a whole URL of its own (an upload URL), which carries its
+    /// own permission -- so the key is never sent to it.
+    /// `accept` lists error statuses that are answers rather than refusals.
     func call(
         _ path: String,
         method: String = "GET",
         body: Data? = nil,
-        contentType: String? = nil
+        contentType: String? = nil,
+        headers: [String: String] = [:],
+        elsewhere: String? = nil,
+        accept: Set<Int> = []
     ) async throws -> Data {
-        guard let url = URL(string: base + path) else {
-            throw SnappedCutError(message: "That is not a usable URL: \(base + path)", status: 0)
+        let target = elsewhere ?? base + path
+        guard let url = URL(string: target) else {
+            throw SnappedCutError(message: "That is not a usable URL: \(target)", status: 0)
         }
 
         var request = URLRequest(url: url)
         request.httpMethod = method
-        request.setValue("snappedcut-swift/0.1.0", forHTTPHeaderField: "user-agent")
-        if !key.isEmpty {
+        request.setValue("snappedcut-swift/\(SnappedCut.version)", forHTTPHeaderField: "user-agent")
+        if !key.isEmpty && elsewhere == nil {
             request.setValue("Bearer \(key)", forHTTPHeaderField: "authorization")
         }
         if let contentType {
             request.setValue(contentType, forHTTPHeaderField: "content-type")
         }
+        for (name, value) in headers { request.setValue(value, forHTTPHeaderField: name) }
         request.httpBody = body
 
         let data: Data
@@ -124,7 +134,7 @@ public struct SnappedCut: Sendable {
             )
         }
 
-        guard status < 400 else {
+        guard status < 400 || accept.contains(status) else {
             // An error body is not guaranteed to be JSON -- a proxy may answer
             // with HTML -- and the status is the part that matters either way.
             let detail = try? JSONDecoder().decode(ErrorBody.self, from: data)
@@ -132,7 +142,8 @@ public struct SnappedCut: Sendable {
                 message: detail?.error ?? "Snapped Cut said \(status).",
                 status: status,
                 retryAfterMs: detail?.retryAfterMs ?? 0,
-                expected: detail?.expected ?? 0
+                expected: detail?.expected ?? 0,
+                code: detail?.code
             )
         }
         return data
@@ -240,10 +251,6 @@ public struct SnappedCut: Sendable {
 
     /// Wait for a job to finish, then hand back the file.
     ///
-    /// Backs off rather than polling at a fixed interval: a render is minutes,
-    /// so a one-second poll spends most of its requests learning nothing, and
-    /// the server has a rate limit a busy loop will find.
-    ///
     /// Honours task cancellation between polls.
     public func wait(
         _ id: String,
@@ -251,6 +258,23 @@ public struct SnappedCut: Sendable {
         onState: (@Sendable (Job) -> Void)? = nil,
         sleeper: (@Sendable (TimeInterval) async throws -> Void)? = nil
     ) async throws -> Data {
+        try await output(waitForJob(id, timeout: timeout, onState: onState, sleeper: sleeper).id)
+    }
+
+    /// Poll a job until it is done, and hand back the job (its `outputs` say
+    /// where the files are). Throws the job's own error if it failed.
+    ///
+    /// Backs off rather than polling at a fixed interval: a render is minutes,
+    /// so a one-second poll spends most of its requests learning nothing, and
+    /// the server has a rate limit a busy loop will find. 1 s, x1.5, capped at 15 s.
+    ///
+    /// Honours task cancellation between polls.
+    public func waitForJob(
+        _ id: String,
+        timeout: TimeInterval = 1800,
+        onState: (@Sendable (Job) -> Void)? = nil,
+        sleeper: (@Sendable (TimeInterval) async throws -> Void)? = nil
+    ) async throws -> Job {
         let rest = sleeper ?? { seconds in
             try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
         }
@@ -261,7 +285,7 @@ public struct SnappedCut: Sendable {
             let current = try await job(id)
             onState?(current)
 
-            if current.isDone { return try await output(id) }
+            if current.isDone { return current }
             // The credits are already back -- the server refunds a failure -- so
             // this is a plain error, not something the caller has to reconcile.
             if current.isFailed {
@@ -278,7 +302,7 @@ public struct SnappedCut: Sendable {
         }
     }
 
-    private func escape(_ value: String) -> String {
+    func escape(_ value: String) -> String {
         value.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? value
     }
 }
@@ -294,4 +318,5 @@ struct ErrorBody: Decodable {
     let error: String?
     let retryAfterMs: Int?
     let expected: Int?
+    let code: String?
 }
